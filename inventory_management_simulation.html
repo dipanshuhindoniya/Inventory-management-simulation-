@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inventory Management Simulation</title>
+<style>
+:root{--bg:#f4f7fb;--card:#fff;--ink:#172033;--muted:#65718a;--accent:#2457d6;--line:#dfe6f0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Arial,Helvetica,sans-serif}
+header{background:#14264b;color:white;padding:28px 18px}header .wrap,main{max-width:1200px;margin:auto}
+h1{margin:0 0 7px;font-size:clamp(24px,4vw,34px)}header p{margin:0;color:#d8e3ff}
+main{padding:22px 16px 40px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 4px 18px #1720330a}
+h2{font-size:20px;margin:0 0 14px}.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:var(--muted);font-weight:700}
+input{width:120px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;color:var(--ink)}
+button{border:0;border-radius:8px;background:var(--accent);color:#fff;padding:11px 15px;font-weight:700;cursor:pointer}
+button.secondary{background:#e7edfb;color:#183d99}button:hover{filter:brightness(.96)}
+.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:13px}th,td{text-align:right;padding:10px 9px;border-bottom:1px solid var(--line)}th{background:#f0f4fb;color:#34415a}td:first-child,th:first-child{text-align:left}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:#f5f8ff;border:1px solid var(--line);border-radius:10px;padding:13px}.kpi span{display:block;color:var(--muted);font-size:12px}.kpi strong{font-size:21px}
+.note{color:var(--muted);font-size:13px}.status{margin-top:10px;color:#17633a;font-weight:700}
+@media(max-width:600px){.card{padding:13px}input{width:100px}}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Inventory Management Simulation</h1><p>Day-by-day stock simulation using a reorder-point / order-quantity (s, Q) policy.</p></div></header>
+<main>
+<section class="card">
+<h2>Simulation settings</h2>
+<div class="controls">
+<label>Simulation days<input id="days" type="number" min="1" max="5000" value="90"></label>
+<label>Random seed<input id="seed" type="number" value="42"></label>
+<button id="runBtn">Run simulation</button>
+<button id="compareBtn" class="secondary">Compare policies</button>
+<button id="csvBtn" class="secondary" disabled>Export daily CSV</button>
+</div>
+<p class="note">Demand is randomly generated using a Poisson distribution. Orders arrive after each product's supplier lead time.</p>
+<div id="status" class="status" aria-live="polite"></div>
+</section>
+<section class="card"><h2>Overall performance</h2><div id="kpis" class="kpis"><div class="kpi"><span>Status</span><strong>Ready</strong></div></div></section>
+<section class="card"><h2>Product performance</h2><div class="table-wrap"><table id="results"><thead></thead><tbody></tbody></table></div></section>
+<section class="card"><h2>Cost and profit report</h2><div class="table-wrap"><table id="costs"><thead></thead><tbody></tbody></table></div></section>
+<section class="card" id="comparisonCard" hidden><h2>Policy comparison</h2><p class="note">Each policy is tested across 20 runs. The highest average profit is marked as the best policy.</p><div class="table-wrap"><table id="comparison"><thead></thead><tbody></tbody></table></div></section>
+<section class="card"><h2>How it works</h2><ol>
+<li>Customer demand is generated for each product every day.</li><li>Available stock is sold; unmet demand is recorded as lost sales.</li>
+<li>If stock plus pending orders is at or below the reorder point, a new order is placed.</li><li>The simulation calculates holding, ordering and stock-out costs, service level, revenue and profit.</li>
+</ol><p class="note">Total cost = holding cost + ordering cost + stock-out penalty. Profit subtracts purchase cost, holding cost, ordering cost and stock-out penalty from revenue.</p></section>
+</main>
+<script>
+const baseProducts = [
+{name:"Notebook",demand:12,price:60,cost:35,holding:.10,orderCost:50,lead:3,rp:45,qty:120,stock:100},
+{name:"Pen Pack",demand:20,price:25,cost:12,holding:.05,orderCost:40,lead:2,rp:50,qty:150,stock:120},
+{name:"Backpack",demand:4,price:900,cost:550,holding:1.50,orderCost:120,lead:5,rp:25,qty:40,stock:40},
+{name:"Calculator",demand:3,price:450,cost:300,holding:.80,orderCost:90,lead:4,rp:18,qty:30,stock:30}
+];
+let dailyLog=[];
+function rngFactory(seed){let s=(Number(seed)||1)>>>0;return ()=>{s=(s+0x6D2B79F5)>>>0;let t=s;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296}}
+function normal(rng){let u=Math.max(rng(),1e-12),v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+function poisson(lam,rng){if(lam<=0)return 0;if(lam>30)return Math.max(0,Math.round(lam+normal(rng)*Math.sqrt(lam)));let limit=Math.exp(-lam),k=0,p=1;do{k++;p*=rng()}while(p>limit);return k-1}
+function simulate(days,seed,rpScale=1,qScale=1){
+ const rng=rngFactory(seed);
+ const ps=baseProducts.map(x=>({...x,rp:Math.round(x.rp*rpScale),qty:Math.max(1,Math.round(x.qty*qScale)),pending:[],demandTotal:0,soldTotal:0,lostTotal:0,orders:0,stockoutDays:0,holdingTotal:0,orderTotal:0,revenue:0,purchaseTotal:0,inventorySum:0}));
+ const log=[];
+ for(let day=1;day<=days;day++) for(const p of ps){
+  const arrived=p.pending.filter(o=>o.day<=day).reduce((a,o)=>a+o.qty,0);
+  p.pending=p.pending.filter(o=>o.day>day);p.stock+=arrived;
+  const demand=poisson(p.demand,rng),sold=Math.min(demand,p.stock),lost=demand-sold;
+  p.stock-=sold;p.demandTotal+=demand;p.soldTotal+=sold;p.lostTotal+=lost;p.revenue+=sold*p.price;
+  if(lost>0)p.stockoutDays++;
+  let ordered=0;const onOrder=p.pending.reduce((a,o)=>a+o.qty,0);
+  if(p.stock+onOrder<=p.rp){ordered=p.qty;p.pending.push({day:day+p.lead,qty:ordered});p.orders++;p.orderTotal+=p.orderCost;p.purchaseTotal+=ordered*p.cost}
+  p.holdingTotal+=p.stock*p.holding;p.inventorySum+=p.stock;
+  log.push({day,product:p.name,demand,sold,lost,received:arrived,ordered,end_stock:p.stock});
+ }
+ const rows=ps.map(p=>{const service=p.demandTotal?p.soldTotal/p.demandTotal*100:100,penalty=p.lostTotal*p.price*.2,lostMargin=p.lostTotal*(p.price-p.cost),totalCost=p.holdingTotal+p.orderTotal+penalty,profit=p.revenue-p.purchaseTotal-p.holdingTotal-p.orderTotal-penalty;return {product:p.name,demand:p.demandTotal,sold:p.soldTotal,lost:p.lostTotal,service_level:service,stockout_days:p.stockoutDays,orders:p.orders,avg_inventory:p.inventorySum/days,holding_cost:p.holdingTotal,order_cost:p.orderTotal,stockout_cost:penalty,lost_margin:lostMargin,total_cost:totalCost,revenue:p.revenue,profit}});
+ return {rows,log};
+}
+const fmt=n=>Number(n).toLocaleString("en-IN",{maximumFractionDigits:1});
+function makeTable(id,cols,rows){const t=document.getElementById(id);t.querySelector("thead").innerHTML="<tr>"+cols.map(c=>`<th>${c.label}</th>`).join("")+"</tr>";t.querySelector("tbody").innerHTML=rows.map(r=>"<tr>"+cols.map(c=>`<td>${c.render?c.render(r[c.key],r):r[c.key]}</td>`).join("")+"</tr>").join("")}
+function showReport(result,days){dailyLog=result.log;const rows=result.rows;const demand=rows.reduce((a,r)=>a+r.demand,0),sold=rows.reduce((a,r)=>a+r.sold,0),profit=rows.reduce((a,r)=>a+r.profit,0),cost=rows.reduce((a,r)=>a+r.total_cost,0),lost=rows.reduce((a,r)=>a+r.lost,0);
+document.getElementById("kpis").innerHTML=[["Days simulated",days],["Total demand",fmt(demand)],["Units sold",fmt(sold)],["Lost sales",fmt(lost)],["Overall service level",(demand?sold/demand*100:100).toFixed(1)+"%"],["Total cost","₹"+fmt(cost)],["Total profit","₹"+fmt(profit)]].map(([a,b])=>`<div class="kpi"><span>${a}</span><strong>${b}</strong></div>`).join("");
+makeTable("results",[{key:"product",label:"Product"},{key:"demand",label:"Demand"},{key:"sold",label:"Sold"},{key:"lost",label:"Lost"},{key:"service_level",label:"Service %",render:v=>v.toFixed(1)+"%"},{key:"stockout_days",label:"Stock-out days"},{key:"orders",label:"Orders"},{key:"avg_inventory",label:"Average inventory",render:fmt}],rows);
+makeTable("costs",[{key:"product",label:"Product"},{key:"holding_cost",label:"Holding cost",render:v=>"₹"+fmt(v)},{key:"order_cost",label:"Ordering cost",render:v=>"₹"+fmt(v)},{key:"stockout_cost",label:"Stock-out cost",render:v=>"₹"+fmt(v)},{key:"total_cost",label:"Total cost",render:v=>"₹"+fmt(v)},{key:"revenue",label:"Revenue",render:v=>"₹"+fmt(v)},{key:"profit",label:"Profit",render:v=>"₹"+fmt(v)}],rows);
+document.getElementById("csvBtn").disabled=false;document.getElementById("status").textContent="Simulation completed successfully.";
+}
+function run(){let days=parseInt(document.getElementById("days").value,10),seed=parseInt(document.getElementById("seed").value,10);if(!Number.isFinite(days)||days<1||days>5000){alert("Enter simulation days from 1 to 5000.");return}showReport(simulate(days,seed),days);document.getElementById("comparisonCard").hidden=true}
+document.getElementById("runBtn").addEventListener("click",run);
+document.getElementById("csvBtn").addEventListener("click",()=>{if(!dailyLog.length)return;const cols=Object.keys(dailyLog[0]);const esc=v=>'"'+String(v).replace(/"/g,'""')+'"';const csv=[cols.join(","),...dailyLog.map(r=>cols.map(k=>esc(r[k])).join(","))].join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="inventory_daily_log.csv";a.click();URL.revokeObjectURL(a.href)});
+document.getElementById("compareBtn").addEventListener("click",()=>{let days=parseInt(document.getElementById("days").value,10),seed=parseInt(document.getElementById("seed").value,10);if(!Number.isFinite(days)||days<1||days>5000){alert("Enter simulation days from 1 to 5000.");return}const results=[];for(const rp of [.6,.8,1,1.3,1.6])for(const q of [.7,1,1.4]){let profits=0,services=0;for(let i=0;i<20;i++){const rows=simulate(days,seed+i,rp,q).rows;profits+=rows.reduce((a,r)=>a+r.profit,0);const d=rows.reduce((a,r)=>a+r.demand,0),s=rows.reduce((a,r)=>a+r.sold,0);services+=d?s/d*100:100}results.push({rp,q,profit:profits/20,service:services/20})}const best=results.reduce((a,b)=>b.profit>a.profit?b:a);makeTable("comparison",[{key:"rp",label:"Reorder point ×",render:v=>v.toFixed(1)},{key:"q",label:"Order quantity ×",render:v=>v.toFixed(1)},{key:"profit",label:"Average profit",render:v=>"₹"+fmt(v)},{key:"service",label:"Service level",render:v=>v.toFixed(1)+"%"},{key:"best",label:"Result",render:(v,r)=>r===best?"Best policy":""}],results);document.getElementById("comparisonCard").hidden=false;document.getElementById("status").textContent=`Policy comparison complete. Best: reorder ×${best.rp}, order quantity ×${best.q}.`;});
+run();
+</script>
+</body>
+</html>
